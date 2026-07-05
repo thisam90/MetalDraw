@@ -22,6 +22,10 @@ static id<CAMetalDrawable> gDrawable = nil;
 static id<MTLRenderCommandEncoder> gEncoder = nil;
 static id<MTLCommandBuffer> gCommandBuffer = nil;
 
+static double gStartTime     = 0.0;
+static double gPrevFrameTime = 0.0;
+static float  gFrameTime     = 0.0f;
+static float  gFrameTimeAvg  = 0.0f;
 
 //MARK: - Internal helpers (private — not in the public header)
 
@@ -102,6 +106,11 @@ void InitWindow(int width, int height, const char *title)
 
     [gWindow makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+
+    // Monotonic clock start. CACurrentMediaTime() is mach_absolute_time in seconds
+    // (pauses during system sleep — desirable, no post-wake delta spike).
+    gStartTime = CACurrentMediaTime();
+    gPrevFrameTime = gStartTime;
 }
 
 bool WindowShouldClose(void)
@@ -165,6 +174,35 @@ void RestoreWindow(void)
     [gWindow deminiaturize:nil];
 }
 
+void SetWindowSize(int width, int height)
+{
+    if (gWindow == nil)
+    {
+        TraceLog(MD_LOG_WARNING, "SetWindowSize: no window (call InitWindow first)");
+        return;
+    }
+    // Sets the CONTENT area in points (the mirror of GetScreenWidth/Height). This
+    // resizes the window's frame, which fires windowDidResize: -> our
+    // md_UpdateDrawableSize() re-syncs the Metal drawable for us, no manual poke.
+    [gWindow setContentSize:NSMakeSize(width, height)];
+}
+
+void SetWindowResizable(bool resizable)
+{
+    if (gWindow == nil) {
+        TraceLog(MD_LOG_WARNING, "SetWindowResizable: no window (call InitWindow first)");
+        return;
+    }
+    // Resizability IS a styleMask bit — no separate boolean exists in AppKit.
+    // Flip only NSWindowStyleMaskResizable, leaving .titled (and the rest) intact:
+    // removing .titled is the combo reported to misbehave on Tahoe; toggling just
+    // .resizable on a titled window is the safe path.
+    if (resizable) {
+        gWindow.styleMask |= NSWindowStyleMaskResizable;
+    } else {
+        gWindow.styleMask &= ~NSWindowStyleMaskResizable;
+    }
+}
 
 //MARK: - Window: Screen-space
 
@@ -213,6 +251,23 @@ int GetRenderHeight(void)
     return (int)px.height;
 }
 
+//MARK: - Timing section
+
+double GetTime(void)
+{
+    return CACurrentMediaTime() - gStartTime;
+}
+
+float GetFrameTime(void)
+{
+    return gFrameTime;
+}
+
+int GetFPS(void)
+{
+    if (gFrameTimeAvg <= 0.0f) return 0;
+    return (int)(1.0f / gFrameTimeAvg + 0.5f);   // round to nearest
+}
 
 
 //MARK: - Drawing: Frame
@@ -250,6 +305,17 @@ void ClearBackground(Color color)
 
 void EndDrawing(void)
 {
+     // Frame delta = full loop period; measured even on skipped frames.
+    double now = CACurrentMediaTime();
+    gFrameTime = (float)(now - gPrevFrameTime);
+    gPrevFrameTime = now;
+
+        // Smoothed frame time (exponential moving average) -> stable GetFPS.
+    if (gFrameTimeAvg <= 0.0f) gFrameTimeAvg = gFrameTime;              // seed
+    else gFrameTimeAvg = gFrameTimeAvg * 0.90f + gFrameTime * 0.10f;
+
+
+
     if (gDrawable == nil || gCommandBuffer == nil) {
         TraceLog(MD_LOG_WARNING, "EndDrawing: no drawable/command buffer, skipping");
         return;

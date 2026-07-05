@@ -34,6 +34,9 @@ void MinimizeWindow(void);
 void MaximizeWindow(void);
 void RestoreWindow(void);
 
+void SetWindowSize(int width, int height);
+void SetWindowResizable(bool resizable);
+
 bool IsWindowResized(void);
 
 int GetScreenWidth(void);    // logical size in POINTS
@@ -41,6 +44,12 @@ int GetScreenHeight(void);
 
 int GetRenderWidth(void);    // physical size in PIXELS
 int GetRenderHeight(void);
+
+
+double GetTime(void);        // seconds since InitWindow (monotonic)
+float GetFrameTime(void);    // last frame delta, seconds
+
+int GetFPS(void);            // smoothed frames-per-second
 
 
 
