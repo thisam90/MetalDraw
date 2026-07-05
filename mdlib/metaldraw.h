@@ -34,6 +34,13 @@ void MinimizeWindow(void);
 void MaximizeWindow(void);
 void RestoreWindow(void);
 
+bool IsWindowResized(void);
+
+int GetScreenWidth(void);    // logical size in POINTS
+int GetScreenHeight(void);
+
+int GetRenderWidth(void);    // physical size in PIXELS
+int GetRenderHeight(void);
 
 
 
