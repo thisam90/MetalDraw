@@ -27,6 +27,8 @@ static id<MTLCommandBuffer> gCommandBuffer = nil;
 @end
 
 
+//MARK: -Window: Lifecycle
+
 void InitWindow(int width, int height, const char *title)
 {
 
@@ -34,8 +36,10 @@ void InitWindow(int width, int height, const char *title)
 [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
 NSRect frame = NSMakeRect(0,0,width,height);
-NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable;
-
+NSWindowStyleMask style = NSWindowStyleMaskTitled
+                        | NSWindowStyleMaskClosable
+                        | NSWindowStyleMaskMiniaturizable
+                        | NSWindowStyleMaskResizable;
 gWindow = [[NSWindow alloc] initWithContentRect:frame
                                           styleMask:style
                                           backing:NSBackingStoreBuffered
@@ -45,6 +49,8 @@ gWindow = [[NSWindow alloc] initWithContentRect:frame
 [gWindow center];
 gWindowDelegate = [[MDWindowDelegate alloc] init];
 gWindow.delegate = gWindowDelegate;
+
+gWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary;
 
 
 //MARK: Metal setup
@@ -92,6 +98,52 @@ void CloseWindow(void)
 }
 
 
+//MARK: - Window: Management
+void SetWindowTitle(const char *title)
+{
+    if (gWindow == nil)
+    {
+        TraceLog(MD_LOG_WARNING, "SetWindowTitle: no window (call InitWindow first)");
+        return;
+    }
+    gWindow.title = [NSString stringWithUTF8String:title];
+}
+
+void MinimizeWindow(void)
+{
+    if (gWindow == nil)
+    {
+        TraceLog(MD_LOG_WARNING," MinimizeWindow: no window (call InitWindow first)");
+        return;
+    }
+    [gWindow miniaturize:nil];
+}
+
+void MaximizeWindow(void)
+{
+    if (gWindow == nil)
+    {
+        TraceLog(MD_LOG_WARNING," MaximizeWindow: no window (call InitWindow first)");
+        return;
+    }
+    [gWindow zoom:nil];
+}
+
+void RestoreWindow(void)
+{
+    if (gWindow == nil)
+    {
+        TraceLog(MD_LOG_WARNING," RestoreWindow: no window (call InitWindow first)");
+        return;
+    }
+    [gWindow deminiaturize:nil];
+}
+//MARK: - Window: Screen 
+
+
+
+
+// MARK: - Drawing: Frame
 void BeginDrawing(void)
 {
     gDrawable = [gMetalLayer nextDrawable];

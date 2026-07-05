@@ -29,6 +29,14 @@ void InitWindow(int width, int height, const char *title);
 bool WindowShouldClose(void);
 void CloseWindow(void);
 
+void SetWindowTitle(const char *title);
+void MinimizeWindow(void);
+void MaximizeWindow(void);
+void RestoreWindow(void);
+
+
+
+
 void BeginDrawing(void);
 void ClearBackground(Color color);
 void EndDrawing(void);

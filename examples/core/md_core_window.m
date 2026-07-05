@@ -7,6 +7,7 @@ int main(void)
 
     Color someColor = { 255, 0, 0, 255 };
 
+
     while (!WindowShouldClose())
     {
         @autoreleasepool
