@@ -7,6 +7,17 @@
 extern "C" {
 #endif
 
+typedef enum {
+    MD_LOG_ALL = 0,
+    MD_LOG_TRACE,
+    MD_LOG_DEBUG,
+    MD_LOG_INFO,
+    MD_LOG_WARNING,
+    MD_LOG_ERROR,
+    MD_LOG_FATAL,
+    MD_LOG_NONE
+} TraceLogLevel;
+
 typedef struct Color {
     unsigned char r;
     unsigned char g;
@@ -21,6 +32,9 @@ void CloseWindow(void);
 void BeginDrawing(void);
 void ClearBackground(Color color);
 void EndDrawing(void);
+
+void TraceLog(int logLevel, const char *text, ...);
+void SetTraceLogLevel(int logLevel);
 
 #ifdef __cplusplus
 }

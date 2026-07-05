@@ -3,13 +3,16 @@
 int main(void)
 {
     InitWindow(800, 600, "MetalDraw Window");
+    SetTraceLogLevel(MD_LOG_ERROR);
+
+    Color someColor = { 255, 0, 0, 255 };
 
     while (!WindowShouldClose())
     {
         @autoreleasepool
         {
             BeginDrawing();
-            ClearBackground((Color){ 0, 128, 255, 255 });   
+            ClearBackground(someColor);
             EndDrawing();
         }
     }

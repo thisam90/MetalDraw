@@ -63,8 +63,7 @@ CGFloat scale = gWindow.backingScaleFactor;
 gMetalLayer.contentsScale = scale;
 gMetalLayer.drawableSize = CGSizeMake(contentView.bounds.size.width * scale,
                                        contentView.bounds.size.height * scale);
-    NSLog(@"MetalDraw: GPU = %@", gDevice.name);
-
+TraceLog(MD_LOG_INFO, "MetalDraw: GPU = %s", gDevice.name.UTF8String);
 
 
 [gWindow makeKeyAndOrderFront:nil];
@@ -97,7 +96,7 @@ void BeginDrawing(void)
 {
     gDrawable = [gMetalLayer nextDrawable];
     if (gDrawable == nil) {
-        NSLog(@"MetalDraw: Failed to get next drawable");
+        TraceLog(MD_LOG_WARNING, "BeginDrawing: no drawable available, skipping frame");
         return;
     }
 
@@ -107,7 +106,7 @@ void BeginDrawing(void)
 void ClearBackground(Color color)
 {
     if (gDrawable == nil || gCommandBuffer == nil) {
-        NSLog(@"MetalDraw: Cannot clear background, drawable or command buffer is nil");
+        TraceLog(MD_LOG_WARNING, "ClearBackground: no drawable/command buffer, skipping");
         return;
     }
 
@@ -125,7 +124,7 @@ void ClearBackground(Color color)
 void EndDrawing(void)
 {
     if (gDrawable == nil || gCommandBuffer == nil) {
-        NSLog(@"MetalDraw: Cannot end drawing, drawable or command buffer is nil");
+        TraceLog(MD_LOG_WARNING, "EndDrawing: no drawable/command buffer, skipping");
         return;
     }
 
