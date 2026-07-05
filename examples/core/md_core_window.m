@@ -6,6 +6,12 @@ int main(void)
 
     while (!WindowShouldClose())
     {
+        @autoreleasepool
+        {
+            BeginDrawing();
+            ClearBackground((Color){ 0, 128, 255, 255 });   
+            EndDrawing();
+        }
     }
 
     CloseWindow();
