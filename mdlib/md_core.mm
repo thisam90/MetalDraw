@@ -184,13 +184,17 @@ bool WindowShouldClose(void)
 {
     gWindowResized = false;   // clear last frame's flag before draining new events
 
-    NSEvent *event;
-    while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                       untilDate:[NSDate distantPast]
-                                          inMode:NSDefaultRunLoopMode
-                                         dequeue:YES]) != nil)
-    {
-        [NSApp sendEvent:event];
+    // Drain events under a per-frame pool: nextEventMatchingMask/sendEvent autorelease
+    // NSEvents; without a pool they'd accumulate (no [NSApp run] top-level pool here).
+    @autoreleasepool {
+        NSEvent *event;
+        while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                           untilDate:[NSDate distantPast]
+                                              inMode:NSDefaultRunLoopMode
+                                             dequeue:YES]) != nil)
+        {
+            [NSApp sendEvent:event];
+        }
     }
     return gShouldClose;
 }
@@ -381,35 +385,43 @@ void SetTargetFPS(int fps)
 
 void BeginDrawing(void)
 {
-    gDrawable = [gMetalLayer nextDrawable];
-    if (gDrawable == nil) {
-        TraceLog(MD_LOG_WARNING, "BeginDrawing: no drawable available, skipping frame");
-        return;
+    // Per-frame pool: nextDrawable/commandBuffer autorelease. gDrawable/gCommandBuffer are
+    // STRONG globals, so they survive this drain (it only consumes the pending autorelease)
+    // and are released deterministically when nil'd in EndDrawing — so the 3-drawable pool
+    // never accumulates. No pool spanning Begin->End is needed.
+    @autoreleasepool {
+        gDrawable = [gMetalLayer nextDrawable];
+        if (gDrawable == nil) {
+            TraceLog(MD_LOG_WARNING, "BeginDrawing: no drawable available, skipping frame");
+            return;
+        }
+        gCommandBuffer = [gCommandQueue commandBuffer];
     }
-
-    gCommandBuffer = [gCommandQueue commandBuffer];
 }
 
 void ClearBackground(Color color)
 {
-    if (gDrawable == nil || gCommandBuffer == nil) {
-        TraceLog(MD_LOG_WARNING, "ClearBackground: no drawable/command buffer, skipping");
-        return;
+    // Per-frame pool: the render-pass descriptor + encoder are autoreleased locals.
+    @autoreleasepool {
+        if (gDrawable == nil || gCommandBuffer == nil) {
+            TraceLog(MD_LOG_WARNING, "ClearBackground: no drawable/command buffer, skipping");
+            return;
+        }
+
+        MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = gDrawable.texture;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(color.r / 255.0,
+                                                                color.g / 255.0,
+                                                                color.b / 255.0,
+                                                                color.a / 255.0);
+
+        // Local, not a global: the encoder lives entirely within this call (created and
+        // ended here). Frame-spanning encoder state gets designed deliberately at M3.
+        id<MTLRenderCommandEncoder> encoder = [gCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        [encoder endEncoding];
     }
-
-    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = gDrawable.texture;
-    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(color.r / 255.0,
-                                                            color.g / 255.0,
-                                                            color.b / 255.0,
-                                                            color.a / 255.0);
-
-    // Local, not a global: the encoder lives entirely within this call (created and
-    // ended here). Frame-spanning encoder state gets designed deliberately at M3.
-    id<MTLRenderCommandEncoder> encoder = [gCommandBuffer renderCommandEncoderWithDescriptor:pass];
-    [encoder endEncoding];
 }
 
 void EndDrawing(void)
@@ -434,8 +446,10 @@ void EndDrawing(void)
                 }
             }
         }];
-        [gCommandBuffer presentDrawable:gDrawable];
-        [gCommandBuffer commit];
+        @autoreleasepool {
+            [gCommandBuffer presentDrawable:gDrawable];
+            [gCommandBuffer commit];
+        }
         gDrawable = nil;
         gCommandBuffer = nil;
     } else {

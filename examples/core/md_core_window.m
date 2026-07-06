@@ -15,21 +15,18 @@ int main(void)
 
     int frameCount = 0;
 
-while (!WindowShouldClose())
+    while (!WindowShouldClose())
     {
-        @autoreleasepool
-        {
-           if (IsWindowResized()) {
-                TraceLog(MD_LOG_INFO, "window resized this frame");
-           }
-            BeginDrawing();
-            ClearBackground(someColor);
-            EndDrawing();
-            if (++frameCount % 60 == 0) {
-                float ft = GetFrameTime();
-                TraceLog(MD_LOG_INFO, "t=%.2fs  frametime=%.4fs  raw=%.0f fps  GetFPS=%d",
-                         GetTime(), ft, ft > 0.0f ? 1.0 / ft : 0.0, GetFPS());
-            }
+        if (IsWindowResized()) {
+            TraceLog(MD_LOG_INFO, "window resized this frame");
+        }
+        BeginDrawing();
+        ClearBackground(someColor);
+        EndDrawing();
+        if (++frameCount % 60 == 0) {
+            float ft = GetFrameTime();
+            TraceLog(MD_LOG_INFO, "t=%.2fs  frametime=%.4fs  raw=%.0f fps  GetFPS=%d",
+                     GetTime(), ft, ft > 0.0f ? 1.0 / ft : 0.0, GetFPS());
         }
     }
 
