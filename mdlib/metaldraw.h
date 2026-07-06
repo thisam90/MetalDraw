@@ -53,13 +53,13 @@ float GetFrameTime(void);    // last frame delta, seconds
 
 int GetFPS(void);            // smoothed frames-per-second
 void WaitTime(double seconds);   // block for a duration (monotonic clock)
-void SetTargetFPS(int fps);   // cap frame rate (0 = uncapped)
+void SetTargetFPS(int fps);   // cap frame rate (0 = uncapped; values 1-9 are raised to a floor of 10)
 
 void BeginDrawing(void);
 void ClearBackground(Color color);
 void EndDrawing(void);
 
-void TraceLog(int logLevel, const char *text, ...);
+void TraceLog(int logLevel, const char *text, ...) __attribute__((format(printf, 2, 3)));
 void SetTraceLogLevel(int logLevel);
 
 #ifdef __cplusplus

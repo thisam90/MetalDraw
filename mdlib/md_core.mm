@@ -77,7 +77,10 @@ static NSSize md_ContentPixelSize(void)
 static void md_UpdateDrawableSize(void)
 {
     if (gWindow == nil || gMetalLayer == nil) return;
-    gMetalLayer.drawableSize = md_ContentPixelSize();
+    NSSize px = md_ContentPixelSize();
+    if (px.width  < 1) px.width  = 1;   // a 0-dimension drawableSize is invalid (nextDrawable fails)
+    if (px.height < 1) px.height = 1;
+    gMetalLayer.drawableSize = px;
 }
 
 // Minimal main menu so the app has a menu bar and a working Cmd-Q. Key equivalents
@@ -112,7 +115,8 @@ static void md_SetupMenuBar(void)
 void InitWindow(int width, int height, const char *title)
 {
     [NSApplication sharedApplication];
-    gInitFailed = false; 
+    if (gWindow != nil) CloseWindow();   // re-init: tear down any prior session cleanly first
+    gInitFailed = false;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
     NSRect frame = NSMakeRect(0, 0, width, height);
@@ -125,7 +129,12 @@ void InitWindow(int width, int height, const char *title)
                                             backing:NSBackingStoreBuffered
                                               defer:NO];
 
-    [gWindow setTitle:[NSString stringWithUTF8String:title]];
+    // ARC is the sole owner of gWindow (strong global). A programmatically-created window
+    // defaults to releasedWhenClosed=YES, so [gWindow close] in CloseWindow would send an
+    // EXTRA release on top of ARC's -> over-release/UAF. Make ARC the only owner.
+    gWindow.releasedWhenClosed = NO;
+
+    [gWindow setTitle:[NSString stringWithUTF8String:(title ? title : "")]];   // NULL-safe
     [gWindow center];
 
     gWindowDelegate = [[MDWindowDelegate alloc] init];
@@ -149,7 +158,19 @@ void InitWindow(int width, int height, const char *title)
 
     gMetalLayer = [CAMetalLayer layer];
     gMetalLayer.device = gDevice;
+
+    // Color contract: BGRA8Unorm = PASSTHROUGH — bytes we write are the bytes shown
+    // (byte-in = byte-shown), matching raylib's Color{0-255}. We deliberately do NOT use
+    // the _sRGB format: it gamma-converts on write/read (correct for linear-space blending
+    // and lighting) but needs colors authored in linear space, and half-switching would
+    // double-gamma. Revisit _sRGB + Display-P3 as a coordinated pipeline change when
+    // textures/blending land (M3+).
     gMetalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+
+    // framebufferOnly = YES (the default, made explicit): the drawable is render-target-only
+    // — cheapest fast path, but it blocks GPU readback. Flip to NO when TakeScreenshot /
+    // texture readback lands.
+    gMetalLayer.framebufferOnly = YES;
 
     NSView *contentView = gWindow.contentView;
     contentView.layer = gMetalLayer;
@@ -182,7 +203,8 @@ bool IsWindowReady(void)
 
 bool WindowShouldClose(void)
 {
-    gWindowResized = false;   // clear last frame's flag before draining new events
+    // (gWindowResized is cleared at the END of the frame in EndDrawing, not here — so a
+    //  resize is visible for the whole frame it happens in, incl. programmatic SetWindowSize.)
 
     // Drain events under a per-frame pool: nextEventMatchingMask/sendEvent autorelease
     // NSEvents; without a pool they'd accumulate (no [NSApp run] top-level pool here).
@@ -201,6 +223,15 @@ bool WindowShouldClose(void)
 
 void CloseWindow(void)
 {
+    // Drain in-flight GPU work first: a late completion handler (GPU-error logging) must not
+    // fire after teardown / process-exit and race stdout. Command buffers complete in order,
+    // so waiting on a fresh one waits for all prior committed frames.
+    if (gCommandQueue != nil) {
+        id<MTLCommandBuffer> drain = [gCommandQueue commandBuffer];
+        [drain commit];
+        [drain waitUntilCompleted];
+    }
+
     [gWindow close];
 
     // Null every global so a later InitWindow starts from a clean slate
@@ -228,49 +259,45 @@ void CloseWindow(void)
 
 //MARK: - Window: Management
 
+// Guard shared by the window-management setters: warns once if there's no window yet.
+static bool md_RequireWindow(const char *fn)
+{
+    if (gWindow != nil) return true;
+    TraceLog(MD_LOG_WARNING, "%s: no window (call InitWindow first)", fn);
+    return false;
+}
+
 void SetWindowTitle(const char *title)
 {
-    if (gWindow == nil) {
-        TraceLog(MD_LOG_WARNING, "SetWindowTitle: no window (call InitWindow first)");
-        return;
-    }
-    gWindow.title = [NSString stringWithUTF8String:title];
+    if (!md_RequireWindow("SetWindowTitle")) return;
+    gWindow.title = [NSString stringWithUTF8String:(title ? title : "")];   // NULL-safe
 }
 
 void MinimizeWindow(void)
 {
-    if (gWindow == nil) {
-        TraceLog(MD_LOG_WARNING, "MinimizeWindow: no window (call InitWindow first)");
-        return;
-    }
+    if (!md_RequireWindow("MinimizeWindow")) return;
     [gWindow miniaturize:nil];
 }
 
 void MaximizeWindow(void)
 {
-    if (gWindow == nil) {
-        TraceLog(MD_LOG_WARNING, "MaximizeWindow: no window (call InitWindow first)");
-        return;
-    }
-    [gWindow zoom:nil];   // macOS "zoom" — the nearest native equivalent to maximize
+    if (!md_RequireWindow("MaximizeWindow")) return;
+    // zoom: is a TOGGLE; guard on isZoomed so repeated calls stay idempotent (raylib contract).
+    if (!gWindow.zoomed) [gWindow zoom:nil];   // macOS "zoom" — nearest native maximize
 }
 
 void RestoreWindow(void)
 {
-    if (gWindow == nil) {
-        TraceLog(MD_LOG_WARNING, "RestoreWindow: no window (call InitWindow first)");
-        return;
-    }
-    [gWindow deminiaturize:nil];
+    if (!md_RequireWindow("RestoreWindow")) return;
+    // Reverse BOTH minimize and maximize (raylib's Restore contract): deminiaturize: only
+    // un-minimizes; zoom: (toggle) un-maximizes when currently zoomed.
+    if (gWindow.miniaturized) [gWindow deminiaturize:nil];
+    if (gWindow.zoomed)       [gWindow zoom:nil];
 }
 
 void SetWindowSize(int width, int height)
 {
-    if (gWindow == nil)
-    {
-        TraceLog(MD_LOG_WARNING, "SetWindowSize: no window (call InitWindow first)");
-        return;
-    }
+    if (!md_RequireWindow("SetWindowSize")) return;
     // Sets the CONTENT area in points (the mirror of GetScreenWidth/Height). This
     // resizes the window's frame, which fires windowDidResize: -> our
     // md_UpdateDrawableSize() re-syncs the Metal drawable for us, no manual poke.
@@ -279,10 +306,7 @@ void SetWindowSize(int width, int height)
 
 void SetWindowResizable(bool resizable)
 {
-    if (gWindow == nil) {
-        TraceLog(MD_LOG_WARNING, "SetWindowResizable: no window (call InitWindow first)");
-        return;
-    }
+    if (!md_RequireWindow("SetWindowResizable")) return;
     // Resizability IS a styleMask bit — no separate boolean exists in AppKit.
     // Flip only NSWindowStyleMaskResizable, leaving .titled (and the rest) intact:
     // removing .titled is the combo reported to misbehave on Tahoe; toggling just
@@ -353,22 +377,23 @@ float GetFrameTime(void)
 int GetFPS(void)
 {
     if (gFrameTimeAvg <= 0.0f) return 0;
-    return (int)(1.0f / gFrameTimeAvg + 0.5f);   // round to nearest
+    return (int)(1.0 / (double)gFrameTimeAvg + 0.5);   // round to nearest (double precision)
 }
 
 void WaitTime(double seconds)
 {
     if (seconds <= 0.0) return;
 
-    // Cache the ticks->nanoseconds ratio once. NOT identity on Apple Silicon
-    // (numer/denom is ~125/3, i.e. ~41.67 ns/tick) — the conversion below is required;
-    // dropping it would make every sleep ~42x too long.
+    // Cache the ticks->nanoseconds ratio once. NOT identity on Apple Silicon (~125/3,
+    // ~41.67 ns/tick) — the conversion is required. Guard BOTH fields: numer is the divisor.
     static mach_timebase_info_data_t tb = {0, 0};
-    if (tb.denom == 0) mach_timebase_info(&tb);
+    if (tb.denom == 0 || tb.numer == 0) mach_timebase_info(&tb);
+    if (tb.numer == 0) return;   // mach_timebase_info unavailable (never on supported HW) — avoid /0
 
-    uint64_t ns       = (uint64_t)(seconds * 1e9);
-    uint64_t deadline = mach_absolute_time() + (ns * tb.denom) / tb.numer;
-    mach_wait_until(deadline);   // sleep until an absolute deadline on our clock
+    // 128-bit intermediate so `ns * denom` can't overflow uint64 for very long waits.
+    uint64_t ns    = (uint64_t)(seconds * 1e9);
+    uint64_t ticks = (uint64_t)(((__uint128_t)ns * tb.denom) / tb.numer);
+    mach_wait_until(mach_absolute_time() + ticks);   // sleep until an absolute deadline on our clock
 }
 
 void SetTargetFPS(int fps)
@@ -385,6 +410,11 @@ void SetTargetFPS(int fps)
 
 void BeginDrawing(void)
 {
+    // No live pipeline (before InitWindow / after CloseWindow / failed init): skip silently,
+    // like the getters — no per-frame WARNING flood. A drawable miss with a LIVE layer still
+    // warns below (a real transient, not teardown).
+    if (gMetalLayer == nil || gCommandQueue == nil) return;
+
     // Per-frame pool: nextDrawable/commandBuffer autorelease. gDrawable/gCommandBuffer are
     // STRONG globals, so they survive this drain (it only consumes the pending autorelease)
     // and are released deterministically when nil'd in EndDrawing — so the 3-drawable pool
@@ -403,10 +433,7 @@ void ClearBackground(Color color)
 {
     // Per-frame pool: the render-pass descriptor + encoder are autoreleased locals.
     @autoreleasepool {
-        if (gDrawable == nil || gCommandBuffer == nil) {
-            TraceLog(MD_LOG_WARNING, "ClearBackground: no drawable/command buffer, skipping");
-            return;
-        }
+        if (gDrawable == nil || gCommandBuffer == nil) return;   // BeginDrawing already reported the miss
 
         MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
         pass.colorAttachments[0].texture = gDrawable.texture;
@@ -426,18 +453,18 @@ void ClearBackground(Color color)
 
 void EndDrawing(void)
 {
-    // Present the frame (plain, vsync-scheduled). We reverted the native
-    // presentDrawable:afterMinimumDuration: throttle: on a hand-managed CAMetalLayer
-    // here it was unreliable — the compositor released drawables after one refresh
-    // instead of holding them 1/target s, so nextDrawable never back-pressured and the
-    // loop escaped to the panel refresh (the 30->120->30 flapping). The rate cap is
-    // now enforced on the CPU below, which is predictable and verifiable.
-    if (gDrawable != nil && gCommandBuffer != nil) {
-        // Surface GPU-side faults (device removal, OOM, page fault). This block runs on a
-        // Metal background thread AFTER the GPU finishes — our first off-main code. It
-        // touches no shared state (only the passed-in cb + thread-safe TraceLog), takes cb
-        // as a PARAMETER so it doesn't retain gCommandBuffer (no cycle), and pools its own
-        // autoreleased NSString since Metal's thread isn't under our main-loop pool.
+    // Clear the resize flag at frame END (after the frame's IsWindowResized() check), so a
+    // resize is visible for its whole frame — including programmatic SetWindowSize, whose
+    // windowDidResize: fires synchronously (not via the event drain).
+    gWindowResized = false;
+
+    bool didPresent = (gDrawable != nil && gCommandBuffer != nil);
+
+    if (didPresent) {
+        // Surface GPU-side faults on a Metal background thread (our only off-main code): reads
+        // only the passed-in cb + thread-safe TraceLog, takes cb as a PARAMETER (no retain
+        // cycle), and pools its own autoreleased NSString. Plain vsync present — the CPU cap
+        // below enforces the rate (afterMinimumDuration: was unreliable on a manual layer).
         [gCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
             @autoreleasepool {
                 if (cb.error) {
@@ -450,39 +477,37 @@ void EndDrawing(void)
             [gCommandBuffer presentDrawable:gDrawable];
             [gCommandBuffer commit];
         }
-        gDrawable = nil;
-        gCommandBuffer = nil;
-    } else {
-        TraceLog(MD_LOG_WARNING, "EndDrawing: no drawable/command buffer, skipping present");
     }
+    // Release every frame (presented or not) so an acquired-but-unpresented drawable —
+    // e.g. commandBuffer returned nil — is returned to the pool immediately.
+    gDrawable = nil;
+    gCommandBuffer = nil;
 
-    // Frame timing + rate cap at end-of-frame (raylib work/wait model): measure the
-    // work this frame took; if a target is set, sleep the remainder so the period is
-    // >= 1/target. WaitTime() (mach_wait_until) enforces it precisely on the CPU.
+    // Frame timing + CPU rate cap (raylib work/wait model).
     double now = CACurrentMediaTime();
 
-    // First real frame: just establish the baseline. Measuring now-gPrevFrameTime
-    // here would fold all of InitWindow->loop setup into frame 0, inflating
-    // gFrameTime and mis-seeding the FPS average for ~20 frames.
+    // Establish the baseline off the first frame that actually PRESENTED — a startup skip
+    // must not seed timing (this also excludes InitWindow->loop setup time from frame 0).
     if (gPrevFrameTime <= 0.0) {
-        gPrevFrameTime = now;
+        if (didPresent) gPrevFrameTime = now;
         return;
     }
 
-    double work = now - gPrevFrameTime;
-
+    // Cap runs every frame, so the loop is paced even when a frame skipped (never spins).
     if (gTargetFPS > 0.0) {
         double target = 1.0 / gTargetFPS;
+        double work = now - gPrevFrameTime;
         if (work < target) {
             WaitTime(target - work);
             now = CACurrentMediaTime();
         }
     }
 
-    gFrameTime = (float)(now - gPrevFrameTime);   // total period, includes any cap wait
-    gPrevFrameTime = now;
-
-    // Smoothed frame time (EMA) -> stable GetFPS.
-    if (gFrameTimeAvg <= 0.0f) gFrameTimeAvg = gFrameTime;               // seed
-    else gFrameTimeAvg = gFrameTimeAvg * 0.90f + gFrameTime * 0.10f;
+    // Measure frame time / FPS only on presented frames — skipped frames don't pollute it.
+    if (didPresent) {
+        gFrameTime = (float)(now - gPrevFrameTime);   // total period, includes any cap wait
+        if (gFrameTimeAvg <= 0.0f) gFrameTimeAvg = gFrameTime;               // seed
+        else gFrameTimeAvg = gFrameTimeAvg * 0.90f + gFrameTime * 0.10f;
+    }
+    gPrevFrameTime = now;   // always advance the cap reference
 }
