@@ -13,9 +13,6 @@ int main(void)
     Color someColor = { 255, 0, 0, 255 };
 
     int frameCount = 0;
-    double before = GetTime();
-
-    TraceLog(MD_LOG_INFO, "WaitTime(0.5) waited %.4fs", GetTime() - before);
 
 while (!WindowShouldClose())
     {
@@ -28,14 +25,10 @@ while (!WindowShouldClose())
             BeginDrawing();
             ClearBackground(someColor);
             EndDrawing();
-            if (++frameCount % 60 == 0)
-            {
-                TraceLog(MD_LOG_INFO, "t=%.2fs  frametime=%.4fs  (~%.0f fps)",
-                GetTime(), GetFrameTime(), 1.0 / GetFrameTime());
-            }
-             if (++frameCount % 60 == 0) {
-                TraceLog(MD_LOG_INFO, "t=%.2fs  raw=%.0f fps  GetFPS=%d",
-                GetTime(), 1.0 / GetFrameTime(), GetFPS());
+            if (++frameCount % 60 == 0) {
+                float ft = GetFrameTime();
+                TraceLog(MD_LOG_INFO, "t=%.2fs  frametime=%.4fs  raw=%.0f fps  GetFPS=%d",
+                         GetTime(), ft, ft > 0.0f ? 1.0 / ft : 0.0, GetFPS());
             }
         }
     }

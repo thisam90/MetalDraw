@@ -49,16 +49,21 @@ static void md_UpdateDrawableSize(void);
 @end
 
 
+// Content-view size in backing PIXELS via AppKit's designated points->pixels
+// conversion (Apple's guidance: use this, not a manual * backingScaleFactor).
+// Shared by the drawable sizing and GetRenderWidth/Height so the drawable we
+// render into and the size we report are computed identically and can't drift.
+// Caller ensures gWindow != nil.
+static NSSize md_ContentPixelSize(void)
+{
+    NSView *view = gWindow.contentView;
+    return [view convertSizeToBacking:view.bounds.size];
+}
+
 static void md_UpdateDrawableSize(void)
 {
     if (gWindow == nil || gMetalLayer == nil) return;
-
-    // Points -> pixels via AppKit's backing conversion (Apple's guidance: use
-    // this, not a manual * backingScaleFactor). It's the SAME expression
-    // GetRenderWidth/Height use, so the drawable we render into and the size we
-    // report are computed identically and can't drift apart.
-    NSView *contentView = gWindow.contentView;
-    gMetalLayer.drawableSize = [contentView convertSizeToBacking:contentView.bounds.size];
+    gMetalLayer.drawableSize = md_ContentPixelSize();
 }
 
 
@@ -110,7 +115,7 @@ void InitWindow(int width, int height, const char *title)
     // Monotonic clock start. CACurrentMediaTime() is mach_absolute_time in seconds
     // (pauses during system sleep — desirable, no post-wake delta spike).
     gStartTime = CACurrentMediaTime();
-    gPrevFrameTime = gStartTime;
+    gPrevFrameTime = 0.0;   // baseline is set at the FIRST EndDrawing, not from setup time
 }
 
 bool WindowShouldClose(void)
@@ -238,23 +243,20 @@ int GetScreenHeight(void)
 int GetRenderWidth(void)
 {
     if (gWindow == nil) return 0;
-    NSView *view = gWindow.contentView;
-    NSSize px = [view convertSizeToBacking:view.bounds.size];
-    return (int)px.width;
+    return (int)md_ContentPixelSize().width;
 }
 
 int GetRenderHeight(void)
 {
     if (gWindow == nil) return 0;
-    NSView *view = gWindow.contentView;
-    NSSize px = [view convertSizeToBacking:view.bounds.size];
-    return (int)px.height;
+    return (int)md_ContentPixelSize().height;
 }
 
 //MARK: - Timing section
 
 double GetTime(void)
 {
+    if (gStartTime <= 0.0) return 0.0;   // before InitWindow: honest 0, not system uptime
     return CACurrentMediaTime() - gStartTime;
 }
 
@@ -273,7 +275,9 @@ void WaitTime(double seconds)
 {
     if (seconds <= 0.0) return;
 
-    // Cache the ticks<->nanoseconds ratio once (identity on Apple Silicon).
+    // Cache the ticks->nanoseconds ratio once. NOT identity on Apple Silicon
+    // (numer/denom is ~125/3, i.e. ~41.67 ns/tick) — the conversion below is required;
+    // dropping it would make every sleep ~42x too long.
     static mach_timebase_info_data_t tb = {0, 0};
     if (tb.denom == 0) mach_timebase_info(&tb);
 
@@ -347,7 +351,16 @@ void EndDrawing(void)
     // Frame timing + rate cap at end-of-frame (raylib work/wait model): measure the
     // work this frame took; if a target is set, sleep the remainder so the period is
     // >= 1/target. WaitTime() (mach_wait_until) enforces it precisely on the CPU.
-    double now  = CACurrentMediaTime();
+    double now = CACurrentMediaTime();
+
+    // First real frame: just establish the baseline. Measuring now-gPrevFrameTime
+    // here would fold all of InitWindow->loop setup into frame 0, inflating
+    // gFrameTime and mis-seeding the FPS average for ~20 frames.
+    if (gPrevFrameTime <= 0.0) {
+        gPrevFrameTime = now;
+        return;
+    }
+
     double work = now - gPrevFrameTime;
 
     if (gTargetFPS > 0.0) {
