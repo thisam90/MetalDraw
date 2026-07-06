@@ -3,7 +3,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include "metaldraw.h"
-
+#include <mach/mach_time.h>   // mach_wait_until / mach_timebase_info
 
 @interface MDWindowDelegate : NSObject <NSWindowDelegate>
 @end
@@ -19,13 +19,13 @@ static id<MTLCommandQueue> gCommandQueue = nil;
 static CAMetalLayer *gMetalLayer = nil;
 static MDWindowDelegate *gWindowDelegate = nil;
 static id<CAMetalDrawable> gDrawable = nil;
-static id<MTLRenderCommandEncoder> gEncoder = nil;
 static id<MTLCommandBuffer> gCommandBuffer = nil;
 
 static double gStartTime     = 0.0;
 static double gPrevFrameTime = 0.0;
 static float  gFrameTime     = 0.0f;
 static float  gFrameTimeAvg  = 0.0f;
+static double gTargetFPS = 0.0;    // 0 = uncapped; else target frames/sec
 
 //MARK: - Internal helpers (private — not in the public header)
 
@@ -51,7 +51,7 @@ static void md_UpdateDrawableSize(void);
 
 static void md_UpdateDrawableSize(void)
 {
-       if (gWindow == nil || gMetalLayer == nil) return;
+    if (gWindow == nil || gMetalLayer == nil) return;
 
     // Points -> pixels via AppKit's backing conversion (Apple's guidance: use
     // this, not a manual * backingScaleFactor). It's the SAME expression
@@ -269,6 +269,28 @@ int GetFPS(void)
     return (int)(1.0f / gFrameTimeAvg + 0.5f);   // round to nearest
 }
 
+void WaitTime(double seconds)
+{
+    if (seconds <= 0.0) return;
+
+    // Cache the ticks<->nanoseconds ratio once (identity on Apple Silicon).
+    static mach_timebase_info_data_t tb = {0, 0};
+    if (tb.denom == 0) mach_timebase_info(&tb);
+
+    uint64_t ns       = (uint64_t)(seconds * 1e9);
+    uint64_t deadline = mach_absolute_time() + (ns * tb.denom) / tb.numer;
+    mach_wait_until(deadline);   // sleep until an absolute deadline on our clock
+}
+
+void SetTargetFPS(int fps)
+{
+    if (fps <= 0) { gTargetFPS = 0.0; return; }   // 0 or negative => uncapped
+    if (fps < 10) fps = 10;                        // floor: WWDC warns presenting
+                                                   // below the panel minimum can drop
+                                                   // the display (tunable)
+    gTargetFPS = (double)fps;
+}
+
 
 //MARK: - Drawing: Frame
 
@@ -299,31 +321,47 @@ void ClearBackground(Color color)
                                                             color.b / 255.0,
                                                             color.a / 255.0);
 
-    gEncoder = [gCommandBuffer renderCommandEncoderWithDescriptor:pass];
-    [gEncoder endEncoding];
+    // Local, not a global: the encoder lives entirely within this call (created and
+    // ended here). Frame-spanning encoder state gets designed deliberately at M3.
+    id<MTLRenderCommandEncoder> encoder = [gCommandBuffer renderCommandEncoderWithDescriptor:pass];
+    [encoder endEncoding];
 }
 
 void EndDrawing(void)
 {
-     // Frame delta = full loop period; measured even on skipped frames.
-    double now = CACurrentMediaTime();
-    gFrameTime = (float)(now - gPrevFrameTime);
-    gPrevFrameTime = now;
-
-        // Smoothed frame time (exponential moving average) -> stable GetFPS.
-    if (gFrameTimeAvg <= 0.0f) gFrameTimeAvg = gFrameTime;              // seed
-    else gFrameTimeAvg = gFrameTimeAvg * 0.90f + gFrameTime * 0.10f;
-
-
-
-    if (gDrawable == nil || gCommandBuffer == nil) {
-        TraceLog(MD_LOG_WARNING, "EndDrawing: no drawable/command buffer, skipping");
-        return;
+    // Present the frame (plain, vsync-scheduled). We reverted the native
+    // presentDrawable:afterMinimumDuration: throttle: on a hand-managed CAMetalLayer
+    // here it was unreliable — the compositor released drawables after one refresh
+    // instead of holding them 1/target s, so nextDrawable never back-pressured and the
+    // loop escaped to the panel refresh (the 30->120->30 flapping). The rate cap is
+    // now enforced on the CPU below, which is predictable and verifiable.
+    if (gDrawable != nil && gCommandBuffer != nil) {
+        [gCommandBuffer presentDrawable:gDrawable];
+        [gCommandBuffer commit];
+        gDrawable = nil;
+        gCommandBuffer = nil;
+    } else {
+        TraceLog(MD_LOG_WARNING, "EndDrawing: no drawable/command buffer, skipping present");
     }
 
-    [gCommandBuffer presentDrawable:gDrawable];
-    [gCommandBuffer commit];
+    // Frame timing + rate cap at end-of-frame (raylib work/wait model): measure the
+    // work this frame took; if a target is set, sleep the remainder so the period is
+    // >= 1/target. WaitTime() (mach_wait_until) enforces it precisely on the CPU.
+    double now  = CACurrentMediaTime();
+    double work = now - gPrevFrameTime;
 
-    gDrawable = nil;
-    gCommandBuffer = nil;
+    if (gTargetFPS > 0.0) {
+        double target = 1.0 / gTargetFPS;
+        if (work < target) {
+            WaitTime(target - work);
+            now = CACurrentMediaTime();
+        }
+    }
+
+    gFrameTime = (float)(now - gPrevFrameTime);   // total period, includes any cap wait
+    gPrevFrameTime = now;
+
+    // Smoothed frame time (EMA) -> stable GetFPS.
+    if (gFrameTimeAvg <= 0.0f) gFrameTimeAvg = gFrameTime;               // seed
+    else gFrameTimeAvg = gFrameTimeAvg * 0.90f + gFrameTime * 0.10f;
 }

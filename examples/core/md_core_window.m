@@ -3,6 +3,7 @@
 int main(void)
 {
     InitWindow(800, 600, "MetalDraw Window");
+        SetTargetFPS(0);
     TraceLog(MD_LOG_INFO, "screen size: %d x %d points", GetScreenWidth(), GetScreenHeight());
     TraceLog(MD_LOG_INFO, "render size: %d x %d pixels", GetRenderWidth(), GetRenderHeight());
     SetWindowSize(1024, 768);
@@ -12,6 +13,9 @@ int main(void)
     Color someColor = { 255, 0, 0, 255 };
 
     int frameCount = 0;
+    double before = GetTime();
+
+    TraceLog(MD_LOG_INFO, "WaitTime(0.5) waited %.4fs", GetTime() - before);
 
 while (!WindowShouldClose())
     {

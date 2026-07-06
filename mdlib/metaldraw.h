@@ -49,9 +49,10 @@ int GetRenderHeight(void);
 double GetTime(void);        // seconds since InitWindow (monotonic)
 float GetFrameTime(void);    // last frame delta, seconds
 
+
 int GetFPS(void);            // smoothed frames-per-second
-
-
+void WaitTime(double seconds);   // block for a duration (monotonic clock)
+void SetTargetFPS(int fps);   // cap frame rate (0 = uncapped)
 
 void BeginDrawing(void);
 void ClearBackground(Color color);
