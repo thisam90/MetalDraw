@@ -41,8 +41,22 @@ static void md_UpdateDrawableSize(void);
     return NO;
 }
 
+- (void)requestQuit:(id)sender {
+    gShouldClose = true;   // Cmd-Q → same clean shutdown path as the red close button
+}
+
 - (void)windowDidResize:(NSNotification *)notification {
     gWindowResized = true;
+    md_UpdateDrawableSize();
+}
+
+- (void)windowDidChangeBackingProperties:(NSNotification *)notification {
+    if (gWindow == nil || gMetalLayer == nil) return;
+    // Fires when the window moves to a display of different scale (Retina <-> 1x) or
+    // color space — windowDidResize: does NOT fire on a pure scale change. We host the
+    // layer (assigned it ourselves), so AppKit won't auto-update contentsScale for us;
+    // re-sync it to the NEW backing scale (convertSizeToBacking: inside the helper reads it).
+    gMetalLayer.contentsScale = gWindow.backingScaleFactor;
     md_UpdateDrawableSize();
 }
 
@@ -68,8 +82,8 @@ static void md_UpdateDrawableSize(void)
 
 // Minimal main menu so the app has a menu bar and a working Cmd-Q. Key equivalents
 // dispatch through the key window then NSApp.mainMenu during [NSApp sendEvent:], which
-// our own event pump already calls — so setting the menu is all it takes. (Quit uses
-// terminate: for now; Step 3 routes it through our own teardown.)
+// our own event pump already calls — so setting the menu is all it takes. Quit sets
+// gShouldClose (like the red button) so both quits share one clean teardown via the loop.
 static void md_SetupMenuBar(void)
 {
     NSMenu *mainMenu = [[NSMenu alloc] init];
@@ -84,8 +98,9 @@ static void md_SetupMenuBar(void)
     NSString *appName   = [[NSProcessInfo processInfo] processName];
     NSString *quitTitle = [@"Quit " stringByAppendingString:appName];
     NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:quitTitle
-                                                      action:@selector(terminate:)
+                                                      action:@selector(requestQuit:)
                                                keyEquivalent:@"q"];   // @"q" + default ⌘ = Cmd-Q
+    quitItem.target = gWindowDelegate;   // route Quit/Cmd-Q through our own shutdown flag
     [appMenu addItem:quitItem];
 
     NSApp.mainMenu = mainMenu;   // strong ref keeps the whole tree alive (ARC)
@@ -183,8 +198,27 @@ bool WindowShouldClose(void)
 void CloseWindow(void)
 {
     [gWindow close];
-    gWindow = nil;
+
+    // Null every global so a later InitWindow starts from a clean slate
+    // (ARC releases each ObjC object as its last strong ref drops here).
+    gWindow         = nil;
     gWindowDelegate = nil;
+    gMetalLayer     = nil;
+    gDrawable       = nil;
+    gCommandBuffer  = nil;
+    gCommandQueue   = nil;
+    gDevice         = nil;
+    NSApp.mainMenu  = nil;
+
+    // Reset frame/loop state to defaults.
+    gShouldClose   = false;
+    gWindowResized = false;
+    gInitFailed    = false;
+    gStartTime     = 0.0;
+    gPrevFrameTime = 0.0;
+    gFrameTime     = 0.0f;
+    gFrameTimeAvg  = 0.0f;
+    gTargetFPS     = 0.0;
 }
 
 
@@ -387,6 +421,19 @@ void EndDrawing(void)
     // loop escaped to the panel refresh (the 30->120->30 flapping). The rate cap is
     // now enforced on the CPU below, which is predictable and verifiable.
     if (gDrawable != nil && gCommandBuffer != nil) {
+        // Surface GPU-side faults (device removal, OOM, page fault). This block runs on a
+        // Metal background thread AFTER the GPU finishes — our first off-main code. It
+        // touches no shared state (only the passed-in cb + thread-safe TraceLog), takes cb
+        // as a PARAMETER so it doesn't retain gCommandBuffer (no cycle), and pools its own
+        // autoreleased NSString since Metal's thread isn't under our main-loop pool.
+        [gCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+            @autoreleasepool {
+                if (cb.error) {
+                    TraceLog(MD_LOG_ERROR, "EndDrawing: GPU error: %s",
+                             cb.error.localizedDescription.UTF8String);
+                }
+            }
+        }];
         [gCommandBuffer presentDrawable:gDrawable];
         [gCommandBuffer commit];
         gDrawable = nil;
