@@ -48,18 +48,18 @@ int GetRenderHeight(void);
 
 
 double GetTime(void);        // seconds since InitWindow (monotonic)
-float GetFrameTime(void);    // last frame delta, seconds
+float  GetFrameTime(void);    // last frame delta, seconds
 
 
-int GetFPS(void);            // smoothed frames-per-second
+int  GetFPS(void);            // smoothed frames-per-second
 void WaitTime(double seconds);   // block for a duration (monotonic clock)
-void SetTargetFPS(int fps);   // cap frame rate (0 = uncapped; values 1-9 are raised to a floor of 10)
+void SetTargetFPS(int fps);   // cap frame rate (0 = uncapped)
 
 void BeginDrawing(void);
 void ClearBackground(Color color);
 void EndDrawing(void);
 
-void TraceLog(int logLevel, const char *text, ...) __attribute__((format(printf, 2, 3)));
+void TraceLog(int logLevel, const char *text, ...);
 void SetTraceLogLevel(int logLevel);
 
 #ifdef __cplusplus
