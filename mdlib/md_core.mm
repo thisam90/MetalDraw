@@ -10,7 +10,7 @@
 
 
 //MARK: - Global state (private to this file)
-
+static bool gInitFailed = false;   // true if InitWindow failed (e.g. no Metal device)
 static bool gShouldClose = false;
 static bool gWindowResized = false;
 static NSWindow *gWindow = nil;
@@ -66,12 +66,38 @@ static void md_UpdateDrawableSize(void)
     gMetalLayer.drawableSize = md_ContentPixelSize();
 }
 
+// Minimal main menu so the app has a menu bar and a working Cmd-Q. Key equivalents
+// dispatch through the key window then NSApp.mainMenu during [NSApp sendEvent:], which
+// our own event pump already calls — so setting the menu is all it takes. (Quit uses
+// terminate: for now; Step 3 routes it through our own teardown.)
+static void md_SetupMenuBar(void)
+{
+    NSMenu *mainMenu = [[NSMenu alloc] init];
+
+    // First submenu = the "application menu" (the system labels it with the app name).
+    NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+    [mainMenu addItem:appMenuItem];
+
+    NSMenu *appMenu = [[NSMenu alloc] init];
+    appMenuItem.submenu = appMenu;
+
+    NSString *appName   = [[NSProcessInfo processInfo] processName];
+    NSString *quitTitle = [@"Quit " stringByAppendingString:appName];
+    NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:quitTitle
+                                                      action:@selector(terminate:)
+                                               keyEquivalent:@"q"];   // @"q" + default ⌘ = Cmd-Q
+    [appMenu addItem:quitItem];
+
+    NSApp.mainMenu = mainMenu;   // strong ref keeps the whole tree alive (ARC)
+}
+
 
 //MARK: - Window: Lifecycle
 
 void InitWindow(int width, int height, const char *title)
 {
     [NSApplication sharedApplication];
+    gInitFailed = false; 
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
     NSRect frame = NSMakeRect(0, 0, width, height);
@@ -94,7 +120,17 @@ void InitWindow(int width, int height, const char *title)
 
     // Metal setup
     gDevice = MTLCreateSystemDefaultDevice();
+      if (gDevice == nil) {
+        TraceLog(MD_LOG_ERROR, "InitWindow: no Metal-capable GPU (MTLCreateSystemDefaultDevice returned nil)");
+        gInitFailed = true;
+        return;
+    }
     gCommandQueue = [gDevice newCommandQueue];
+        if (gCommandQueue == nil) {
+        TraceLog(MD_LOG_ERROR, "InitWindow: failed to create Metal command queue");
+        gInitFailed = true;
+        return;
+    }
 
     gMetalLayer = [CAMetalLayer layer];
     gMetalLayer.device = gDevice;
@@ -109,14 +145,25 @@ void InitWindow(int width, int height, const char *title)
 
     TraceLog(MD_LOG_INFO, "MetalDraw: GPU = %s", gDevice.name.UTF8String);
 
+    md_SetupMenuBar();
+
     [gWindow makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
+    [NSApp activate];   // macOS 14+ cooperative activation (replaces deprecated activateIgnoringOtherApps:)
+
 
     // Monotonic clock start. CACurrentMediaTime() is mach_absolute_time in seconds
     // (pauses during system sleep — desirable, no post-wake delta spike).
     gStartTime = CACurrentMediaTime();
     gPrevFrameTime = 0.0;   // baseline is set at the FIRST EndDrawing, not from setup time
 }
+
+bool IsWindowReady(void)
+{
+    return !gInitFailed && gWindow != nil && gDevice != nil
+        && gCommandQueue != nil && gMetalLayer != nil;
+}
+
+
 
 bool WindowShouldClose(void)
 {

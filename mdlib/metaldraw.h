@@ -28,6 +28,7 @@ typedef struct Color {
 void InitWindow(int width, int height, const char *title);
 bool WindowShouldClose(void);
 void CloseWindow(void);
+bool IsWindowReady(void);
 
 void SetWindowTitle(const char *title);
 void MinimizeWindow(void);

@@ -3,6 +3,7 @@
 int main(void)
 {
     InitWindow(800, 600, "MetalDraw Window");
+        if (!IsWindowReady()) { CloseWindow(); return 1; }
         SetTargetFPS(0);
     TraceLog(MD_LOG_INFO, "screen size: %d x %d points", GetScreenWidth(), GetScreenHeight());
     TraceLog(MD_LOG_INFO, "render size: %d x %d pixels", GetRenderWidth(), GetRenderHeight());
@@ -21,7 +22,6 @@ while (!WindowShouldClose())
            if (IsWindowResized()) {
                 TraceLog(MD_LOG_INFO, "window resized this frame");
            }
-
             BeginDrawing();
             ClearBackground(someColor);
             EndDrawing();
