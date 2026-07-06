@@ -35,6 +35,73 @@ typedef struct WindowConfig {
     bool fullscreen;    // start in native macOS fullscreen (ignored if 'hidden' is set)
 } WindowConfig;
 
+// Keyboard keys — values match raylib's KeyboardKey (familiarity); mapped internally from the
+// physical, layout-independent macOS keyCode. (Subset for now — grows as we add keys.)
+typedef enum {
+    MD_KEY_NULL          = 0,
+    // Printable
+    MD_KEY_APOSTROPHE    = 39,
+    MD_KEY_COMMA         = 44,
+    MD_KEY_MINUS         = 45,
+    MD_KEY_PERIOD        = 46,
+    MD_KEY_SLASH         = 47,
+    MD_KEY_ZERO          = 48, MD_KEY_ONE, MD_KEY_TWO, MD_KEY_THREE, MD_KEY_FOUR,
+    MD_KEY_FIVE, MD_KEY_SIX, MD_KEY_SEVEN, MD_KEY_EIGHT, MD_KEY_NINE,       // 48..57
+    MD_KEY_SEMICOLON     = 59,
+    MD_KEY_EQUAL         = 61,
+    MD_KEY_A             = 65, MD_KEY_B, MD_KEY_C, MD_KEY_D, MD_KEY_E, MD_KEY_F, MD_KEY_G,
+    MD_KEY_H, MD_KEY_I, MD_KEY_J, MD_KEY_K, MD_KEY_L, MD_KEY_M, MD_KEY_N, MD_KEY_O,
+    MD_KEY_P, MD_KEY_Q, MD_KEY_R, MD_KEY_S, MD_KEY_T, MD_KEY_U, MD_KEY_V, MD_KEY_W,
+    MD_KEY_X, MD_KEY_Y, MD_KEY_Z,                                           // 65..90
+    MD_KEY_LEFT_BRACKET  = 91,
+    MD_KEY_BACKSLASH     = 92,
+    MD_KEY_RIGHT_BRACKET = 93,
+    MD_KEY_GRAVE         = 96,
+    // Function / navigation
+    MD_KEY_SPACE         = 32,
+    MD_KEY_ESCAPE        = 256,
+    MD_KEY_ENTER         = 257,
+    MD_KEY_TAB           = 258,
+    MD_KEY_BACKSPACE     = 259,
+    MD_KEY_INSERT        = 260,   // no Mac keycode
+    MD_KEY_DELETE        = 261,   // forward-delete
+    MD_KEY_RIGHT         = 262,
+    MD_KEY_LEFT          = 263,
+    MD_KEY_DOWN          = 264,
+    MD_KEY_UP            = 265,
+    MD_KEY_PAGE_UP       = 266,
+    MD_KEY_PAGE_DOWN     = 267,
+    MD_KEY_HOME          = 268,
+    MD_KEY_END           = 269,
+    MD_KEY_CAPS_LOCK     = 280,   // reports the caps LATCH (LED on/off), not a momentary press
+    MD_KEY_SCROLL_LOCK   = 281,   // no Mac keycode
+    MD_KEY_NUM_LOCK      = 282,   // no Mac keycode
+    MD_KEY_PRINT_SCREEN  = 283,   // no Mac keycode
+    MD_KEY_PAUSE         = 284,   // no Mac keycode
+    MD_KEY_F1            = 290, MD_KEY_F2, MD_KEY_F3, MD_KEY_F4, MD_KEY_F5, MD_KEY_F6,
+    MD_KEY_F7, MD_KEY_F8, MD_KEY_F9, MD_KEY_F10, MD_KEY_F11, MD_KEY_F12,    // 290..301
+    // Keypad
+    MD_KEY_KP_0          = 320, MD_KEY_KP_1, MD_KEY_KP_2, MD_KEY_KP_3, MD_KEY_KP_4,
+    MD_KEY_KP_5, MD_KEY_KP_6, MD_KEY_KP_7, MD_KEY_KP_8, MD_KEY_KP_9,        // 320..329
+    MD_KEY_KP_DECIMAL    = 330,
+    MD_KEY_KP_DIVIDE     = 331,
+    MD_KEY_KP_MULTIPLY   = 332,
+    MD_KEY_KP_SUBTRACT   = 333,
+    MD_KEY_KP_ADD        = 334,
+    MD_KEY_KP_ENTER      = 335,
+    MD_KEY_KP_EQUAL      = 336,
+    // Modifiers (arrive via flagsChanged, not keyDown/keyUp)
+    MD_KEY_LEFT_SHIFT    = 340,
+    MD_KEY_LEFT_CONTROL  = 341,
+    MD_KEY_LEFT_ALT      = 342,
+    MD_KEY_LEFT_SUPER    = 343,   // left Command (⌘)
+    MD_KEY_RIGHT_SHIFT   = 344,
+    MD_KEY_RIGHT_CONTROL = 345,
+    MD_KEY_RIGHT_ALT     = 346,
+    MD_KEY_RIGHT_SUPER   = 347,   // right Command (⌘)
+    MD_KEY_KB_MENU       = 348    // no Mac keycode
+} KeyboardKey;
+
 WindowConfig GetWindowConfigDefault(void);   // defaults-populated descriptor to override
 void InitWindow(int width, int height, const char *title);   // window with the default config
 void InitWindowEx(int width, int height, const char *title, WindowConfig config);
@@ -101,6 +168,12 @@ void SetTargetFPS(int fps);   // cap frame rate (0 = uncapped)
 void BeginDrawing(void);
 void ClearBackground(Color color);
 void EndDrawing(void);
+
+// Input: Keyboard — key is an MD_KEY_* value
+bool IsKeyPressed(int key);    // went down THIS frame (edge)
+bool IsKeyDown(int key);       // currently held
+bool IsKeyReleased(int key);   // went up THIS frame (edge)
+bool IsKeyUp(int key);         // currently not held
 
 void TraceLog(int logLevel, const char *text, ...);
 void SetTraceLogLevel(int logLevel);

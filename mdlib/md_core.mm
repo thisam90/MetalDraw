@@ -3,6 +3,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include "metaldraw.h"
+#include "md_internal.h"      // private cross-.mm shared state + input hooks
 #include <mach/mach_time.h>   // mach_wait_until / mach_timebase_info
 
 @interface MDWindowDelegate : NSObject <NSWindowDelegate>
@@ -19,7 +20,7 @@
 static bool gInitFailed = false;   // true if InitWindow failed (e.g. no Metal device)
 static bool gShouldClose = false;
 static bool gWindowResized = false;
-static NSWindow *gWindow = nil;
+NSWindow *gWindow = nil;   // NON-static: shared with md_input.mm via md_internal.h (extern)
 static id<MTLDevice> gDevice = nil;
 static id<MTLCommandQueue> gCommandQueue = nil;
 static CAMetalLayer *gMetalLayer = nil;
@@ -66,12 +67,23 @@ static void md_UpdateDrawableSize(void);
     md_UpdateDrawableSize();
 }
 
+- (void)windowDidResignKey:(NSNotification *)notification {
+    // Focus left our window (Cmd-Tab / click away). Clear held keys so a key or modifier released
+    // while another app is frontmost can't latch "down" forever (its release never reaches us).
+    md_ResetKeyStates();
+}
+
 @end
 
 
 @implementation MDWindow
 - (BOOL)canBecomeKeyWindow  { return YES; }   // borderless windows return NO by default
 - (BOOL)canBecomeMainWindow { return YES; }
+// Consume key events so an unhandled keyDown doesn't ring the system beep (NSResponder's
+// noResponderFor:). We already capture key state in md_ProcessEvent during the pump, and menu
+// key-equivalents (Cmd-Q) are matched in sendEvent: BEFORE keyDown: dispatch, so ⌘Q still works.
+- (void)keyDown:(NSEvent *)event { (void)event; }
+- (void)keyUp:(NSEvent *)event   { (void)event; }
 @end
 
 
@@ -258,6 +270,10 @@ bool WindowShouldClose(void)
     // (gWindowResized is cleared at the END of the frame in EndDrawing, not here — so a
     //  resize is visible for the whole frame it happens in, incl. programmatic SetWindowSize.)
 
+    // Once per frame, BEFORE draining: roll input current -> previous so IsKeyPressed/Released
+    // see this-frame edges against last frame's end state.
+    md_PollInputSnapshot();
+
     // Drain events under a per-frame pool: nextEventMatchingMask/sendEvent autorelease
     // NSEvents; without a pool they'd accumulate (no [NSApp run] top-level pool here).
     @autoreleasepool {
@@ -267,7 +283,8 @@ bool WindowShouldClose(void)
                                               inMode:NSDefaultRunLoopMode
                                              dequeue:YES]) != nil)
         {
-            [NSApp sendEvent:event];
+            md_ProcessEvent(event);   // capture key state from this event...
+            [NSApp sendEvent:event];  // ...then dispatch it (menu Cmd-Q, window buttons, etc.)
         }
     }
     return gShouldClose;
