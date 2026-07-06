@@ -8,6 +8,12 @@
 @interface MDWindowDelegate : NSObject <NSWindowDelegate>
 @end
 
+// NSWindow subclass used for ALL windows. Its only job: force canBecomeKey/Main = YES so a
+// BORDERLESS (undecorated) window can still receive keyboard focus — borderless NSWindows return
+// NO by default. Harmless for a titled window (which already returns YES).
+@interface MDWindow : NSWindow
+@end
+
 
 //MARK: - Global state (private to this file)
 static bool gInitFailed = false;   // true if InitWindow failed (e.g. no Metal device)
@@ -63,6 +69,12 @@ static void md_UpdateDrawableSize(void);
 @end
 
 
+@implementation MDWindow
+- (BOOL)canBecomeKeyWindow  { return YES; }   // borderless windows return NO by default
+- (BOOL)canBecomeMainWindow { return YES; }
+@end
+
+
 // Content-view size in backing PIXELS via AppKit's designated points->pixels
 // conversion (Apple's guidance: use this, not a manual * backingScaleFactor).
 // Shared by the drawable sizing and GetRenderWidth/Height so the drawable we
@@ -112,7 +124,25 @@ static void md_SetupMenuBar(void)
 
 //MARK: - Window: Lifecycle
 
+WindowConfig GetWindowConfigDefault(void)
+{
+    // Metal-descriptor style: return a fully-populated descriptor with sensible defaults; the
+    // caller flips only the fields it cares about, then hands it to InitWindowEx.
+    WindowConfig cfg;
+    cfg.resizable   = true;
+    cfg.undecorated = false;
+    cfg.hidden      = false;
+    cfg.topmost     = false;
+    cfg.fullscreen  = false;
+    return cfg;
+}
+
 void InitWindow(int width, int height, const char *title)
+{
+    InitWindowEx(width, height, title, GetWindowConfigDefault());   // the descriptor path, defaulted
+}
+
+void InitWindowEx(int width, int height, const char *title, WindowConfig config)
 {
     [NSApplication sharedApplication];
     if (gWindow != nil) CloseWindow();   // re-init: tear down any prior session cleanly first
@@ -120,11 +150,15 @@ void InitWindow(int width, int height, const char *title)
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
     NSRect frame = NSMakeRect(0, 0, width, height);
-    NSWindowStyleMask style = NSWindowStyleMaskTitled
-                            | NSWindowStyleMaskClosable
-                            | NSWindowStyleMaskMiniaturizable
-                            | NSWindowStyleMaskResizable;
-    gWindow = [[NSWindow alloc] initWithContentRect:frame
+    // Undecorated => borderless (no title bar/buttons); otherwise the standard titled chrome.
+    // Resizable is an independent styleMask bit layered on top of either base.
+    NSWindowStyleMask style = config.undecorated
+        ? NSWindowStyleMaskBorderless
+        : (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable);
+    if (config.resizable) style |= NSWindowStyleMaskResizable;
+    // MDWindow (NSWindow subclass) forces canBecomeKey/Main=YES so a BORDERLESS window can still
+    // take keyboard focus (a plain borderless NSWindow returns NO); a no-op for a titled window.
+    gWindow = [[MDWindow alloc] initWithContentRect:frame
                                           styleMask:style
                                             backing:NSBackingStoreBuffered
                                               defer:NO];
@@ -140,7 +174,11 @@ void InitWindow(int width, int height, const char *title)
     gWindowDelegate = [[MDWindowDelegate alloc] init];
     gWindow.delegate = gWindowDelegate;
 
-    gWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary;
+    // FullScreenPrimary lets THIS window enter native full-screen (its own Space) via
+    // toggleFullScreen: and shows the green full-screen button. (Auxiliary — the old value —
+    // only lets a window ACCOMPANY another window's full-screen Space; it can't go full-screen
+    // itself, so toggleFullScreen: would be a no-op.)
+    gWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
 
     // Metal setup
     gDevice = MTLCreateSystemDefaultDevice();
@@ -183,8 +221,22 @@ void InitWindow(int width, int height, const char *title)
 
     md_SetupMenuBar();
 
-    [gWindow makeKeyAndOrderFront:nil];
-    [NSApp activate];   // macOS 14+ cooperative activation (replaces deprecated activateIgnoringOtherApps:)
+    if (config.topmost) gWindow.level = NSFloatingWindowLevel;   // always-on-top from creation
+
+    // hidden wins over fullscreen (fullscreen implies on-screen). Surface the dropped request
+    // rather than silently ignoring it.
+    if (config.hidden && config.fullscreen) {
+        TraceLog(MD_LOG_WARNING, "InitWindowEx: fullscreen ignored because hidden is set");
+    }
+
+    // Show unless created hidden — 'hidden' lets the caller position/prepare before the first
+    // paint with no flash (a freshly-alloc'd NSWindow is off-screen until ordered front). A
+    // hidden window is never sent fullscreen (fullscreen implies on-screen).
+    if (!config.hidden) {
+        [gWindow makeKeyAndOrderFront:nil];
+        [NSApp activate];   // macOS 14+ cooperative activation (replaces activateIgnoringOtherApps:)
+        if (config.fullscreen) [gWindow toggleFullScreen:nil];   // native fullscreen (async)
+    }
 
 
     // Monotonic clock start. CACurrentMediaTime() is mach_absolute_time in seconds
@@ -267,6 +319,14 @@ static bool md_RequireWindow(const char *fn)
     return false;
 }
 
+// Primary-display height in POINTS (re-read per call). CGDisplayBounds(CGMainDisplayID()) is
+// the menu-bar display — origin (0,0), raylib's "primary" — so it survives display hot-plug /
+// rearrangement with no cached-height staleness. Points, matching NSWindow.frame (not pixels).
+static CGFloat md_PrimaryDisplayHeight(void)
+{
+    return CGDisplayBounds(CGMainDisplayID()).size.height;
+}
+
 void SetWindowTitle(const char *title)
 {
     if (!md_RequireWindow("SetWindowTitle")) return;
@@ -318,6 +378,131 @@ void SetWindowResizable(bool resizable)
     }
 }
 
+void SetWindowPosition(int x, int y)
+{
+    if (!md_RequireWindow("SetWindowPosition")) return;
+    if (IsWindowFullscreen()) return;   // fullscreen owns its Space at the full frame — a move
+                                        // here won't migrate it and corrupts the restore frame
+                                        // (matches GLFW: setWindowPos is a no-op in fullscreen)
+    // (x,y) = desired CONTENT top-left in raylib space (top-left origin, y DOWN). Rebuild the
+    // content rect at the CURRENT content size, un-flip y to AppKit's bottom-left (content's
+    // bottom edge), grow it back to a FRAME rect (re-adds the title bar for the current style),
+    // and hand setFrameOrigin: the frame bottom-left it expects — feeding the content origin
+    // straight in would be off by the title-bar height. Negative x/y are intentionally NOT
+    // clamped (needed for displays left of / above the primary in a multi-monitor layout).
+    NSRect content = [gWindow contentRectForFrameRect:gWindow.frame];   // current content size
+    CGFloat bottomY = md_PrimaryDisplayHeight() - ((CGFloat)y + content.size.height);
+    NSRect wantContent = NSMakeRect((CGFloat)x, bottomY, content.size.width, content.size.height);
+    NSRect wantFrame   = [gWindow frameRectForContentRect:wantContent];
+    [gWindow setFrameOrigin:wantFrame.origin];
+}
+
+void SetWindowMinSize(int width, int height)
+{
+    if (!md_RequireWindow("SetWindowMinSize")) return;
+    // CONTENT-area minimum — pairs with SetWindowSize (setContentSize) and GetScreenWidth/Height.
+    // Constrains interactive (user-drag) resizing; AppKit does NOT retroactively resize the
+    // current window, so a window already smaller keeps its size until the next resize.
+    gWindow.contentMinSize = NSMakeSize(width, height);
+}
+
+void SetWindowMaxSize(int width, int height)
+{
+    if (!md_RequireWindow("SetWindowMaxSize")) return;
+    // CONTENT-area maximum (same caveat as SetWindowMinSize: limits future resizing, doesn't
+    // shrink the window now). contentMaxSize, not maxSize — maxSize would include the title bar.
+    gWindow.contentMaxSize = NSMakeSize(width, height);
+}
+
+void SetWindowOpacity(float opacity)
+{
+    if (!md_RequireWindow("SetWindowOpacity")) return;
+    if (opacity < 0.0f) opacity = 0.0f;   // clamp to AppKit's valid [0,1] alpha range
+    if (opacity > 1.0f) opacity = 1.0f;
+    gWindow.alphaValue = opacity;   // whole-window translucency, title bar included
+}
+
+void SetWindowFocused(void)
+{
+    if (!md_RequireWindow("SetWindowFocused")) return;
+    // Raise + make key (input focus). Like GLFW's focus path: no NSApp activate, so it reorders
+    // our own windows without yanking the foreground away from another app the user is using.
+    [gWindow makeKeyAndOrderFront:nil];
+}
+
+void HideWindow(void)
+{
+    if (!md_RequireWindow("HideWindow")) return;
+    [gWindow orderOut:nil];   // off the screen list — IsWindowHidden() goes true (not miniaturized)
+}
+
+void UnhideWindow(void)
+{
+    if (!md_RequireWindow("UnhideWindow")) return;
+    [gWindow orderFront:nil];   // back onto the screen list (doesn't steal key from another window)
+}
+
+void SetWindowTopmost(bool enabled)
+{
+    if (!md_RequireWindow("SetWindowTopmost")) return;
+    // Floating level keeps the window above normal windows even when not key; Normal restores the
+    // regular stacking order. Mirrors GLFW_FLOATING / raylib FLAG_WINDOW_TOPMOST.
+    gWindow.level = enabled ? NSFloatingWindowLevel : NSNormalWindowLevel;
+}
+
+void ToggleFullscreen(void)
+{
+    if (!md_RequireWindow("ToggleFullscreen")) return;
+    // Native macOS full-screen: animates into the window's OWN Space and auto-hides the menu bar.
+    // Needs NSWindowCollectionBehaviorFullScreenPrimary (set in InitWindow). The transition is
+    // ASYNC — windowDidResize: fires as the frame grows and re-syncs the Metal drawable for us;
+    // IsWindowFullscreen() flips only once the transition commits (a query right after may lag).
+    [gWindow toggleFullScreen:nil];
+}
+
+//MARK: - Window: State queries
+
+// Live window-server state — main-thread only, nil-safe (false before InitWindow / after
+// CloseWindow, like the size getters — no per-frame WARNING). Each pairs with an action above.
+
+bool IsWindowMinimized(void)
+{
+    // Dock-miniaturized only (mirrors MinimizeWindow). Goes false the instant it's
+    // deminiaturized — not a general "off screen" flag.
+    return gWindow != nil && gWindow.miniaturized;
+}
+
+bool IsWindowMaximized(void)
+{
+    // isZoomed is COMPUTED by frame comparison, not a stored "we zoomed" flag: a window
+    // dragged to fill the standard frame reads true; a zoomed one nudged off it reads false.
+    // Unrelated to native full-screen (toggleFullScreen:) — that never shows up here.
+    return gWindow != nil && gWindow.zoomed;
+}
+
+bool IsWindowFocused(void)
+{
+    // Key window = has keyboard/input focus (isKeyWindow, NOT isMainWindow). Correctly goes
+    // false on app deactivation, so no need to also gate on NSApp.isActive.
+    return gWindow != nil && gWindow.keyWindow;
+}
+
+bool IsWindowHidden(void)
+{
+    // "Hidden" = orderOut:'d (off the screen list) but NOT Dock-miniaturized. A miniaturized
+    // window ALSO reports isVisible==NO, so AND-out miniaturization or a minimized window
+    // gets misreported as hidden.
+    return gWindow != nil && !gWindow.visible && !gWindow.miniaturized;
+}
+
+bool IsWindowFullscreen(void)
+{
+    // AppKit adds NSWindowStyleMaskFullScreen to the mask while in native full-screen. This is the
+    // COMMITTED state — since toggleFullScreen: is async, it reflects the transition's end, not the
+    // instant of the call. (Not NSView's isInFullScreenMode — that's the legacy enterFullScreenMode: API.)
+    return gWindow != nil && (gWindow.styleMask & NSWindowStyleMaskFullScreen) != 0;
+}
+
 //MARK: - Window: Screen-space
 
 bool IsWindowResized(void)
@@ -359,6 +544,138 @@ int GetRenderHeight(void)
 {
     if (gWindow == nil) return 0;
     return (int)md_ContentPixelSize().height;
+}
+
+// Window position = CONTENT-AREA top-left, TOP-LEFT origin, y DOWN, on the PRIMARY display —
+// pairs with GetScreenWidth/Height (content size). AppKit's frame is bottom-left / y-up and
+// INCLUDES the title bar, so contentRectForFrameRect: strips the bar (style-aware, never a
+// hardcoded bar height) and we flip y against the primary-display height. Nil-guard returns 0
+// silently, like the size getters (no per-frame WARNING). (int) truncation matches raylib.
+
+int GetWindowPositionX(void)
+{
+    if (gWindow == nil) return 0;
+    return (int)[gWindow contentRectForFrameRect:gWindow.frame].origin.x;
+}
+
+int GetWindowPositionY(void)
+{
+    if (gWindow == nil) return 0;
+    NSRect content = [gWindow contentRectForFrameRect:gWindow.frame];
+    // Distance from the TOP of the primary display down to the content's TOP edge.
+    return (int)(md_PrimaryDisplayHeight() - (content.origin.y + content.size.height));
+}
+
+// Backing scale of the window's current display: 1.0 non-Retina, 2.0 Retina — the same ratio
+// GetRenderWidth/GetScreenWidth reflect. macOS scale is uniform, so one float suffices (raylib
+// returns a Vector2 with x==y here). Returns 1.0 with no window — a neutral scale, deliberately
+// NOT the size getters' 0 (a 0 scale would be a divide-by-zero trap for callers).
+float GetWindowScaleDPI(void)
+{
+    if (gWindow == nil) return 1.0f;
+    return (float)gWindow.backingScaleFactor;
+}
+
+//MARK: - Monitors
+
+// Monitors are indexed into [NSScreen screens] (ordering is stable within a session; index 0 is
+// NOT guaranteed to be the primary). Sizes/positions are in POINTS — consistent with GetScreen*
+// and window position, and matching raylib on macOS (GLFW video modes are screen-coordinates =
+// points too). Out-of-range index warns once and returns a safe 0.
+static NSScreen *md_ScreenAt(int monitor, const char *fn)
+{
+    NSScreen *result = nil;
+    @autoreleasepool {   // [NSScreen screens] returns an autoreleased array — drain it here
+        NSArray<NSScreen *> *screens = [NSScreen screens];
+        if (monitor < 0 || monitor >= (int)screens.count) {
+            TraceLog(MD_LOG_WARNING, "%s: monitor %d out of range (have %d)", fn, monitor, (int)screens.count);
+        } else {
+            result = screens[monitor];   // system-owned; stays valid after the pool drains (ARC retains)
+        }
+    }
+    return result;
+}
+
+int GetMonitorCount(void)
+{
+    @autoreleasepool { return (int)[NSScreen screens].count; }
+}
+
+int GetCurrentMonitor(void)
+{
+    if (gWindow == nil) return 0;
+    @autoreleasepool {
+        NSScreen *screen = gWindow.screen;   // nil if the window is fully offscreen
+        if (screen == nil) return 0;
+        NSUInteger idx = [[NSScreen screens] indexOfObject:screen];   // pointer identity
+        return (idx == NSNotFound) ? 0 : (int)idx;
+    }
+}
+
+int GetMonitorWidth(int monitor)
+{
+    NSScreen *screen = md_ScreenAt(monitor, "GetMonitorWidth");
+    return screen ? (int)screen.frame.size.width : 0;
+}
+
+int GetMonitorHeight(int monitor)
+{
+    NSScreen *screen = md_ScreenAt(monitor, "GetMonitorHeight");
+    return screen ? (int)screen.frame.size.height : 0;
+}
+
+int GetMonitorRefreshRate(int monitor)
+{
+    NSScreen *screen = md_ScreenAt(monitor, "GetMonitorRefreshRate");
+    // maximumFramesPerSecond (macOS 12+): max refresh in Hz — 60, or 120 on ProMotion. Avoids
+    // CGDisplayModeGetRefreshRate, which returns 0 for built-in Apple displays.
+    return screen ? (int)screen.maximumFramesPerSecond : 0;
+}
+
+int GetMonitorPositionX(int monitor)
+{
+    NSScreen *screen = md_ScreenAt(monitor, "GetMonitorPositionX");
+    return screen ? (int)screen.frame.origin.x : 0;
+}
+
+int GetMonitorPositionY(int monitor)
+{
+    NSScreen *screen = md_ScreenAt(monitor, "GetMonitorPositionY");
+    if (screen == nil) return 0;
+    // Flip to top-left origin like GetWindowPositionY: top edge measured down from the primary.
+    NSRect f = screen.frame;
+    return (int)(md_PrimaryDisplayHeight() - (f.origin.y + f.size.height));
+}
+
+const char *GetMonitorName(int monitor)
+{
+    NSScreen *screen = md_ScreenAt(monitor, "GetMonitorName");
+    // Copy out: localizedName's UTF8String is autoreleased (freed when a pool drains), so we
+    // can't hand the caller that pointer. Static buffer -> valid until the next call (raylib's
+    // contract). Main-thread only, so the shared buffer is not a data race.
+    static char nameBuf[256];
+    @autoreleasepool {
+        const char *name = screen ? screen.localizedName.UTF8String : "";
+        snprintf(nameBuf, sizeof nameBuf, "%s", name ? name : "");
+    }
+    return nameBuf;
+}
+
+void SetWindowMonitor(int monitor)
+{
+    if (!md_RequireWindow("SetWindowMonitor")) return;
+    NSScreen *screen = md_ScreenAt(monitor, "SetWindowMonitor");
+    if (screen == nil) return;
+    if (IsWindowFullscreen()) return;   // same as SetWindowPosition: don't move a fullscreen
+                                        // window's Space via setFrameOrigin (defined no-op)
+    // Center the window in the target monitor's visibleFrame (excludes menu bar + Dock), keeping
+    // its current size — moving a windowed app to another display. Not clamped: a window larger
+    // than the target simply overflows, matching how a manual drag would leave it.
+    NSRect vis = screen.visibleFrame;
+    NSRect win = gWindow.frame;
+    CGFloat x = vis.origin.x + (vis.size.width  - win.size.width)  * 0.5;
+    CGFloat y = vis.origin.y + (vis.size.height - win.size.height) * 0.5;
+    [gWindow setFrameOrigin:NSMakePoint(x, y)];
 }
 
 //MARK: - Timing section
